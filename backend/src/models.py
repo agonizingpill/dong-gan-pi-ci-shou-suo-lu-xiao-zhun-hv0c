@@ -5,6 +5,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base, utcnow
 
+BLIND_TOLERANCE_PP = 2.0
+
 
 class Role(StrEnum):
     OPERATOR = 'operator'
@@ -47,6 +49,21 @@ class ReleaseState(StrEnum):
     RELEASED = 'released'
 
 
+class BlindState(StrEnum):
+    SEALED = 'sealed'
+    OPENED = 'opened'
+    VOID = 'void'
+
+
+class WitnessState(StrEnum):
+    IDLE = 'idle'
+    QUEUED = 'queued'
+    RUNNING = 'running'
+    FAILED = 'failed'
+    PREDICTED = 'predicted'
+    COMPLETED = 'completed'
+
+
 def enum(values):
     return Enum(values, values_callable=lambda variants: [item.value for item in variants])
 
@@ -67,6 +84,7 @@ class RecipeLot(Base):
     nominal_mm: Mapped[float] = mapped_column(Double)
     window_low: Mapped[float] = mapped_column(Double)
     window_high: Mapped[float] = mapped_column(Double)
+    trial_opened_at = mapped_column(DateTime(), nullable=True)
 
 
 class DryBatch(Base):
@@ -134,3 +152,52 @@ class LabEvent(Base):
     action: Mapped[str] = mapped_column(String(48))
     detail: Mapped[str] = mapped_column(Text)
     happened_at = mapped_column(DateTime(), default=utcnow)
+
+
+class BlindValidation(Base):
+    __tablename__ = 'blind_validations'
+    __table_args__ = (UniqueConstraint('recipe_code', 'sealed_index'),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    recipe_code: Mapped[str] = mapped_column(ForeignKey('recipe_lots.code'), index=True)
+    sealed_index: Mapped[int] = mapped_column(default=1)
+    state: Mapped[BlindState] = mapped_column(enum(BlindState), default=BlindState.SEALED, index=True)
+    tolerance_pp: Mapped[float] = mapped_column(Double, default=BLIND_TOLERANCE_PP)
+    sealed_by: Mapped[str] = mapped_column(String(32))
+    sealed_note: Mapped[str] = mapped_column(String(240))
+    sealed_at = mapped_column(DateTime(), default=utcnow)
+    roster_hash: Mapped[str] = mapped_column(String(64))
+    training_snapshot: Mapped[list] = mapped_column(JSON)
+    opened_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    opened_note: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    opened_at = mapped_column(DateTime(), nullable=True)
+    opening_basis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    voided_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    voided_note: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    voided_at = mapped_column(DateTime(), nullable=True)
+
+
+class BlindWitness(Base):
+    __tablename__ = 'blind_witnesses'
+    __table_args__ = (
+        UniqueConstraint('blind_id', 'batch_code'), UniqueConstraint('blind_id', 'run_id'),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    blind_id: Mapped[int] = mapped_column(ForeignKey('blind_validations.id'), index=True)
+    batch_code: Mapped[str] = mapped_column(ForeignKey('dry_batches.code'), index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey('chamber_runs.id'))
+    job_state: Mapped[WitnessState] = mapped_column(enum(WitnessState), default=WitnessState.IDLE, index=True)
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    attempts: Mapped[int] = mapped_column(default=0)
+    predicted_at = mapped_column(DateTime(), nullable=True)
+    observed_pct: Mapped[float | None] = mapped_column(Double, nullable=True)
+    observed_pairs: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    curve_hash_at_observed: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    observed_note: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    observed_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    observed_at = mapped_column(DateTime(), nullable=True)
+    error_pp: Mapped[float | None] = mapped_column(Double, nullable=True)
+    within_tolerance: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    touched_at = mapped_column(DateTime(), default=utcnow)

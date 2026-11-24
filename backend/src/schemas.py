@@ -83,3 +83,37 @@ class RetestIn(Input):
 
 class DecisionIn(Input):
     note: Note
+
+
+class BlindSealIn(Input):
+    recipe_code: Code
+    witness_batches: list[Code] = Field(min_length=1, max_length=20)
+    note: Note
+
+
+class BlindObservedPair(Input):
+    specimen: Code
+    before_mm: Positive
+    after_mm: Positive
+
+    @model_validator(mode='after')
+    def no_expansion(self):
+        if self.after_mm > self.before_mm:
+            raise ValueError('冻干后厚度不能大于冻干前读数')
+        return self
+
+
+class BlindObservedIn(Input):
+    note: Note
+    pairs: list[BlindObservedPair] = Field(min_length=2, max_length=20)
+
+    @model_validator(mode='after')
+    def unique_specimens(self):
+        names = [pair.specimen for pair in self.pairs]
+        if len(set(names)) != len(names):
+            raise ValueError('试片编号不能重复')
+        return self
+
+
+class BlindVoidIn(Input):
+    note: Note

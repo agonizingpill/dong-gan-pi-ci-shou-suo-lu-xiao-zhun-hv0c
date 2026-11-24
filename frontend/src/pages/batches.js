@@ -77,7 +77,13 @@ export function batchesPage() {
       <div class="batch-list">${store.batches.map(batch => `<a href="#batches/${h(batch.code)}" class="batch-link" ${batch.code === detail?.batch.code ? 'aria-current="true"' : ''}>
         <span><b class="mono">${h(batch.code)}</b><small>${h(batch.recipe_code)} / ${h(batch.dryer)}</small></span>${badge(batch.state)}</a>`).join('')}</div>
       ${operator ? batchForm() : ''}
-      <details class="entry-form"><summary>配方档案（${store.recipes.length}）</summary><ul class="recipe-list">${store.recipes.map(recipe => `<li><b class="mono">${h(recipe.code)}</b><span>${h(recipe.product)} · ${windowLabel([recipe.window_low, recipe.window_high])}</span></li>`).join('')}</ul></details>
+      <details class="entry-form"><summary>配方档案（${store.recipes.length}）</summary><ul class="recipe-list">${store.recipes.map(recipe => {
+        const blind = store.blindOverview.find(item => item.recipe.code === recipe.code);
+        const latest = blind?.validations[0];
+        return `<li><b class="mono">${h(recipe.code)}</b><span>${h(recipe.product)} · ${windowLabel([recipe.window_low, recipe.window_high])}</span>
+        ${latest ? `<a class="text-link" href="#blind/${latest.id}">盲验：${h(latest.state === 'opened' ? '已开通试算' : latest.state === 'void' ? '已作废' : '封存中')} →</a>`
+          : '<span class="warn-text">盲验：未开通</span>'}</li>`;
+      }).join('')}</ul></details>
       ${supervisor ? recipeForm() : ''}</aside>
     ${detail ? `<div class="work-detail">
       <header class="batch-heading"><div><span class="overline">${h(detail.recipe.product)} / ${h(detail.batch.material_lot)}</span>

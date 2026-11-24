@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from . import blind_routes
 from .operations_evidence import router as operations_evidence
 from .db import engine, redis
 from .routes import router
@@ -14,6 +15,7 @@ from .routes import router
 log = logging.getLogger('uvicorn.error')
 app = FastAPI(title='北屿果研 · 冻干计量台', version='1.0')
 app.include_router(operations_evidence)
+app.include_router(blind_routes.router)
 app.include_router(router)
 
 

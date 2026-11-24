@@ -174,6 +174,9 @@ def queue_fit(db, batch, actor):
     if batch.state != BatchState.COLLECTING:
         blocked(db, actor, 'fit.queue', '该批次当前状态不可提交新试算', batch.code)
     recipe = db.get(RecipeLot, batch.recipe_code)
+    if recipe.trial_opened_at is None:
+        blocked(db, actor, 'fit.queue',
+                '该配方尚未通过收缩率盲验，盲验全部见证批达标后才开放生产试算', batch.code)
     try:
         run = training_run(db, batch)
         target_pairs = paired_measurements(db, run)

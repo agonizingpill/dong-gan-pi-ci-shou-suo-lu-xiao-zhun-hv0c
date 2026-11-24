@@ -2,6 +2,7 @@ import {api, loadInventory, setToken, store} from './api.js';
 import {chart} from './components/curve.js';
 import {shell} from './components/ledger.js';
 import {batchesPage} from './pages/batches.js';
+import {blindPage} from './pages/blind.js';
 import {labPage, releasePage} from './pages/calibration.js';
 import {loginPage} from './pages/login.js';
 import {h, readCurveCSV} from './presentation.js';
@@ -40,13 +41,20 @@ async function draw() {
     return;
   }
   const [fragment, id] = location.hash.slice(1).split('/');
-  const current = ['batches', 'lab', 'release'].includes(fragment) ? fragment : 'batches';
+  const current = ['batches', 'lab', 'release', 'blind'].includes(fragment) ? fragment : 'batches';
   try {
     if (current === 'release') {
       const [register, entry] = await Promise.all([api.register(), id ? api.calibration(id) : null]);
       if (index !== renderIndex) return;
       store.register = register;
       store.calibration = entry;
+    } else if (current === 'blind') {
+      const [overview, entry] = await Promise.all([
+        api.blindOverview(), id ? api.blind(id).catch(() => null) : null,
+      ]);
+      if (index !== renderIndex) return;
+      store.blindOverview = overview;
+      store.blind = entry;
     } else {
       await loadInventory();
       const selected = id || store.batch?.batch.code || store.batches.find(batch => batch.code === 'FD-1121A')?.code || store.batches[0]?.code;
@@ -54,7 +62,7 @@ async function draw() {
       if (index !== renderIndex) return;
       store.batch = detail;
     }
-    const pages = {batches: batchesPage, lab: labPage, release: releasePage};
+    const pages = {batches: batchesPage, lab: labPage, release: releasePage, blind: blindPage};
     show(shell(current, store.user, pages[current]()));
     const canvas = document.getElementById('chamber-chart');
     if (canvas) stopChart = chart(canvas, store.batch.runs[0].points);
@@ -136,12 +144,36 @@ const commands = {
     await draw();
     toast('批次放行已签发');
   },
+  blindSeal: async data => {
+    const result = await api.blindSeal(data);
+    open(`blind/${result.validation.id}`);
+    toast('盲验已封存，训练参考与见证名单已冻结');
+  },
+  blindPredict: async (_data, _button, extra) => {
+    const witness = await api.blindPredict(extra.witness);
+    await draw();
+    toast(`${witness.batch_code} 的预测已提交锁定，先预测后实测`);
+  },
+  blindObserved: async (data, _button, extra) => {
+    const pairs = [0, 1].map(i => ({
+      specimen: data[`specimen_${i}`], before_mm: Number(data[`before_mm_${i}`]),
+      after_mm: Number(data[`after_mm_${i}`]),
+    })).filter(pair => pair.specimen);
+    const result = await api.blindObserved(extra.witness, {note: data.note, pairs});
+    open(`blind/${result.validation.id}`);
+    toast('实测已按冻结曲线核对并登记');
+  },
+  blindVoid: async (data, _button, extra) => {
+    const result = await api.blindVoid(extra.blind, data);
+    open(`blind/${result.validation.id}`);
+    toast('本轮盲验已作废，可封存新一轮');
+  },
 };
 
-async function execute(action, payload, button) {
+async function execute(action, payload, button, extra = {}) {
   if (button) button.disabled = true;
   try {
-    await commands[action](payload);
+    await commands[action](payload, button, extra);
   } catch (error) {
     if (error.status === 401 && action !== 'login') logout();
     toast(error.message, true);
@@ -153,7 +185,18 @@ async function execute(action, payload, button) {
 root.addEventListener('submit', event => {
   event.preventDefault();
   const form = event.target;
-  execute(form.dataset.action, Object.fromEntries(new FormData(form)), event.submitter);
+  const action = form.dataset.action;
+  let payload;
+  if (action === 'blindSeal') {
+    const formData = new FormData(form);
+    payload = {
+      recipe_code: formData.get('recipe_code'), note: formData.get('note'),
+      witness_batches: formData.getAll('witness_batches'),
+    };
+  } else {
+    payload = Object.fromEntries(new FormData(form));
+  }
+  execute(action, payload, event.submitter, form.dataset);
 });
 root.addEventListener('click', event => {
   const button = event.target.closest('button');
@@ -163,7 +206,7 @@ root.addEventListener('click', event => {
     form.elements.password.value = 'Lab-demo-1062';
     form.elements.username.focus();
   }
-  if (button?.dataset.action) execute(button.dataset.action, undefined, button);
+  if (button?.dataset.action) execute(button.dataset.action, undefined, button, button.dataset);
 });
 root.addEventListener('change', async event => {
   const target = event.target;

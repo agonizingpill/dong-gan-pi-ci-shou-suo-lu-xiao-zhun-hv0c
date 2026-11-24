@@ -4,9 +4,13 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session as OrmSession
 
 from src.auth import password_hash
+from src.calculation import estimate
 from src.db import engine
-from src.ledger import checksum, queue_fit
-from src.models import BatchState, ChamberRun, DryBatch, RecipeLot, Role, RunState, ShrinkageSample, Stage, User
+from src.ledger import checksum, feature_row, observed, queue_fit
+from src.models import (
+    BatchState, BlindState, BlindValidation, BlindWitness, ChamberRun, DryBatch,
+    RecipeLot, Role, RunState, ShrinkageSample, Stage, User, WitnessState,
+)
 
 STAMP = datetime(2026, 11, 21, 0, 0)
 
@@ -43,6 +47,7 @@ def seed(db):
         ('FD-1121B', 8.2, 252, 32, -19, None, BatchState.COLLECTING),
         ('FD-1121C', 9.3, 365, 49, -9, 19, BatchState.COLLECTING),
     ]
+    pending_fits = []
     for code, feed, minutes, pressure, temp, shrinkage, state in fixtures:
         if db.get(DryBatch, code) is not None:
             continue
@@ -67,8 +72,115 @@ def seed(db):
                                        technician='operator', recorded_at=STAMP))
         db.flush()
         if code in ('FD-1121A', 'FD-1121C'):
-            queue_fit(db, batch, 'operator')
+            pending_fits.append(batch)
+    # The demo blind validation must open production trials before fits can queue.
+    seed_blind(db)
+    for batch in pending_fits:
+        queue_fit(db, batch, 'operator')
     return len(db.scalars(select(DryBatch.code)).all())
+
+
+def frozen_witness_batch(db, code, feed, minutes, pressure, temp):
+    batch = DryBatch(code=code, recipe_code='AP-26R3', dryer='FDX-02', material_lot=f'APL-{code[3:]}',
+                     feed_mm=feed, state=BatchState.COLLECTING)
+    db.add(batch)
+    db.flush()
+    readings = points(minutes, pressure, temp)
+    run = ChamberRun(batch_code=code, source_name=f'{code}_chamber_r1.csv', state=RunState.FROZEN,
+                     points=readings, checksum=checksum(readings), frozen_at=STAMP)
+    db.add(run)
+    db.flush()
+    return batch, run
+
+
+def add_witness_samples(db, run, feed, target_shrinkage, offsets=(-0.4, 0.4)):
+    for specimen, delta in zip(('TRAY-A', 'TRAY-C'), offsets, strict=True):
+        for stage, reading in [
+            (Stage.PRE, feed),
+            (Stage.POST, round(feed * (1 - (target_shrinkage + delta) / 100), 5)),
+        ]:
+            db.add(ShrinkageSample(run_id=run.id, specimen=specimen, stage=stage, thickness_mm=reading,
+                                   technician='operator', recorded_at=STAMP))
+    db.flush()
+
+
+def seed_blind(db):
+    recipe = db.get(RecipeLot, 'AP-26R3')
+    if db.scalar(select(BlindValidation.id).filter_by(recipe_code=recipe.code)) is not None:
+        return
+    witness_specs = [
+        ('FD-1131W', 8.4, 210, 28, -23),
+        ('FD-1132W', 8.8, 300, 38, -15),
+    ]
+    created = []
+    for code, feed, minutes, pressure, temp in witness_specs:
+        if db.get(DryBatch, code) is None:
+            batch, run = frozen_witness_batch(db, code, feed, minutes, pressure, temp)
+        else:
+            batch = db.get(DryBatch, code)
+            run = db.scalar(select(ChamberRun).filter_by(batch_code=code).order_by(ChamberRun.id.desc()).limit(1))
+        created.append((batch, run, feed))
+    references = db.scalars(select(DryBatch).filter_by(recipe_code=recipe.code, state=BatchState.REFERENCE)
+                            .order_by(DryBatch.code)).all()
+    training = []
+    for historical in references:
+        archived = db.scalar(select(ChamberRun).filter_by(batch_code=historical.code)
+                             .order_by(ChamberRun.id.desc()).limit(1))
+        pairs = {}
+        for sample in db.scalars(select(ShrinkageSample).filter_by(run_id=archived.id)
+                                 .order_by(ShrinkageSample.specimen, ShrinkageSample.id)):
+            pairs.setdefault(sample.specimen, {})[sample.stage] = round(sample.thickness_mm, 5)
+        training.append({'batch': historical.code, 'curve_hash': archived.checksum,
+                         'features': feature_row(historical, recipe, archived),
+                         'observed': observed(pairs), 'pairs': pairs})
+    roster = {'recipe': recipe.code, 'tolerance_pp': 2.0,
+              'training_batches': [item['batch'] for item in training],
+              'witness_batches': [batch.code for batch, _, _ in created]}
+    validation = BlindValidation(
+        recipe_code=recipe.code, sealed_index=1, state=BlindState.OPENED, tolerance_pp=2.0,
+        sealed_by='supervisor', sealed_note='投产前收缩率盲验封存（演示）', sealed_at=STAMP,
+        roster_hash=checksum(roster), training_snapshot=training,
+    )
+    db.add(validation)
+    db.flush()
+    basis_witnesses = []
+    # Predictions are locked first; measured specimens are built afterwards around each
+    # prediction so the demo blind passes with realistic, non-zero per-batch errors.
+    for index, (batch, run, feed) in enumerate(created):
+        snapshot = {
+            'blind_id': validation.id, 'batch': batch.code, 'recipe': recipe.code,
+            'curve_hash': run.checksum, 'features': feature_row(batch, recipe, run),
+            'window': [round(recipe.window_low, 5), round(recipe.window_high, 5)], 'training': training,
+        }
+        result = estimate(snapshot)
+        target = result['prediction_pct'] + (0.5 if index == 0 else -0.6)
+        add_witness_samples(db, run, feed, target)
+        pairs = {}
+        for sample in db.scalars(select(ShrinkageSample).filter_by(run_id=run.id)
+                                 .order_by(ShrinkageSample.specimen, ShrinkageSample.id)):
+            pairs.setdefault(sample.specimen, {})[sample.stage] = round(sample.thickness_mm, 5)
+        measured = observed(pairs)
+        error_pp = round(measured - result['prediction_pct'], 6)
+        pair_rows = [{'specimen': name, 'before_mm': pair[Stage.PRE], 'after_mm': pair[Stage.POST]}
+                     for name, pair in pairs.items()]
+        db.add(BlindWitness(
+            blind_id=validation.id, batch_code=batch.code, run_id=run.id,
+            job_state=WitnessState.COMPLETED, input_hash=checksum(snapshot), snapshot=snapshot,
+            result=result, attempts=1, predicted_at=STAMP, observed_pct=measured,
+            observed_pairs=pair_rows, curve_hash_at_observed=run.checksum,
+            observed_note='盲验见证实测登记（演示）', observed_by='operator', observed_at=STAMP,
+            error_pp=error_pp, within_tolerance=abs(error_pp) <= 2.0 + 1e-9, touched_at=STAMP,
+        ))
+        basis_witnesses.append({'batch': batch.code, 'prediction_pct': result['prediction_pct'],
+                                'observed_pct': measured, 'error_pp': error_pp,
+                                'curve_hash': run.checksum})
+        db.flush()
+    validation.opened_by = 'supervisor'
+    validation.opened_at = STAMP
+    validation.opened_note = '全部见证批误差在允许范围内，开放生产试算'
+    validation.opening_basis = {'tolerance_pp': 2.0, 'roster_hash': validation.roster_hash,
+                                'witnesses': basis_witnesses}
+    recipe.trial_opened_at = STAMP
 
 
 def main():

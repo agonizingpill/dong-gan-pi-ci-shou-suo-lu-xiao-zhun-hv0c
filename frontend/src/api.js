@@ -1,6 +1,6 @@
 export const store = {
   token: sessionStorage.getItem('freeze-lab-token'), user: null, batches: [], recipes: [],
-  batch: null, calibration: null, register: [],
+  batch: null, calibration: null, register: [], blindOverview: [], blind: null,
 };
 
 export function setToken(token) {
@@ -42,8 +42,16 @@ export const api = {
   retry: id => request(`${fitPath(id)}/retry`, 'POST'),
   retest: (id, data) => request(`${fitPath(id)}/retest`, 'POST', data),
   release: (id, data) => request(`${fitPath(id)}/release`, 'POST', data),
+  blindOverview: () => request('/blind/recipes-overview'),
+  blind: id => request(`/blind/${id}`),
+  blindSeal: data => request('/blind/seal', 'POST', data),
+  blindPredict: id => request(`/blind/witnesses/${id}/predict`, 'POST'),
+  blindObserved: (id, data) => request(`/blind/witnesses/${id}/observed`, 'POST', data),
+  blindVoid: (id, data) => request(`/blind/${id}/void`, 'POST', data),
 };
 
 export async function loadInventory() {
-  [store.batches, store.recipes] = await Promise.all([api.batches(), api.recipes()]);
+  [store.batches, store.recipes, store.blindOverview] = await Promise.all([
+    api.batches(), api.recipes(), api.blindOverview(),
+  ]);
 }

@@ -16,6 +16,11 @@ export function labPage() {
       <div><dt>首测记录</dt><dd>${detail.samples.length} 条阶段测量</dd></div>
       <div><dt>收缩率工艺窗</dt><dd class="mono">${windowLabel([recipe.window_low, recipe.window_high])}</dd></div></dl>
       ${detail.readiness_issue ? `<p class="callout warning">${h(detail.readiness_issue)} <a href="#batches/${h(detail.batch.code)}">处理采集记录 →</a></p>` : ''}
+      ${(() => {
+        const blind = store.blindOverview.find(item => item.recipe.code === recipe.code);
+        if (blind?.trial_opened) return '<p class="callout">该配方已通过收缩率盲验，生产试算已开通。<a href="#blind">查看开通依据 →</a></p>';
+        return '<p class="callout warning">该配方尚未通过收缩率盲验，生产试算未开通。<a href="#blind">前往盲验开通 →</a></p>';
+      })()}
       ${entry ? `<a class="primary button-link" href="#release/${entry.id}">查看校准单</a>` : staff && detail.batch.state === 'collecting' ?
         `<button data-action="fit" class="primary" ${detail.readiness_issue ? 'disabled' : ''}>提交冻结曲线试算</button>` : `<p class="empty">${detail.batch.state === 'reference' ? '该批次已认证为历史参考。' : '当前账户仅可查看采集与试算记录。'}</p>`}
       ` : '<p class="empty">先在批次与曲线登记物料。</p>'}</div></section>

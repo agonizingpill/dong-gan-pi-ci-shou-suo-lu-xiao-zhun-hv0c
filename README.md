@@ -8,9 +8,9 @@
 
 | 角色 | 主要页面 | 权限和典型动作 |
 |---|---|---|
-| `operator` 实验员 | 批次与曲线、收缩率试算、放行详情 | 登记冻干批次，导入并冻结曲线，配对厚度，提交试算，登记独立试片复测 |
-| `supervisor` 签发主管 | 批次与曲线、收缩率试算、放行详情 | 建新配方版本，认证历史标定参考，提交试算或重试，签发已复测确认的批次 |
-| `viewer` 只读观察员 | 全部业务页 | 查阅批次、配方、曲线、测量、拟合证据和签发台账 |
+| `operator` 实验员 | 批次与曲线、收缩率试算、盲验开通、放行详情 | 登记冻干批次，导入并冻结曲线，配对厚度，提交试算，登记独立试片复测，锁定盲验预测与登记实测 |
+| `supervisor` 签发主管 | 批次与曲线、收缩率试算、盲验开通、放行详情 | 建新配方版本，认证历史标定参考，封存/作废盲验，提交试算或重试，签发已复测确认的批次 |
+| `viewer` 只读观察员 | 全部业务页 | 查阅批次、配方、曲线、测量、拟合证据、盲验轮次和签发台账 |
 
 三个账号的用户名就是角色，演示密码均为 `Lab-demo-1062`。
 
@@ -26,7 +26,23 @@
 6. 09:00 `FD-1121B_chamber_r0.csv` 缺少抽真空段，冻结与试算均被拒绝。补传 `FD-1121B_chamber_recovered.csv` 后，仍须补齐 `TRAY-Q2` 冻干后 7.07 mm 才能提交。
 7. 09:30 `FD-1121C_chamber_r1.csv` 的预测超过 16.0%。实验员复测后仍留置本周期。若要重新评估，导入新曲线并记录该曲线的新试片，历史留置单继续可查。
 
-首次启动 seed 含 6 批、3 配方、2 条缺真空的曲线、20 条测量和 2 个试算输入。worker 会把两个试算分别推进窗内待复测和超窗待复测。历史曲线、试片和校准单都有确定的关联，重复 seed 保留已有状态与业务录入。
+首次启动 seed 含 8 批、3 配方、2 条缺真空的曲线、20 条测量、2 个试算输入和一轮已通过的收缩率盲验（2 个见证批）。worker 会把两个试算分别推进窗内待复测和超窗待复测。历史曲线、试片和校准单都有确定的关联，重复 seed 保留已有状态与业务录入。
+
+## 收缩率盲验（投产前开通）
+
+新配方投产前，主管在「盲验开通」页封存一轮盲验，把**训练参考名单**与**同配方见证批名单**同时冻结：
+
+- 见证批必须已冻结各自的设备曲线，但不能是已认证的训练参考；见证批后来获得参考认证，也不会进入本次封存的训练集——训练参考在封存时即复制为不可变快照。
+- 每个见证批**先锁定预测**（worker 按封存快照拟合，预测、输入哈希与证据写入 `/evidence/blind-<id>.json`），**后登记实测**。实测登记时复核当前曲线指纹与封存快照一致，即各批都按各自冻结的曲线核对。
+- 逐批误差 = 实测均值 − 锁定预测（百分点）。名单上**每批**绝对误差都在 **2 个百分点**以内才自动开放该配方的生产试算（`recipe_lots.trial_opened_at`）；任一批超差，本轮盲验自动作废，已登记结果保留。
+- 主管可主动作废封存中的盲验，作废后可封存新一轮（轮次 `sealed_index` 递增，历史轮次全程可查）。作废后才提交的预测或实测属于晚到记录，状态守卫拒绝其进入任何新盲验，不能给新盲验凑数。
+- 未通过盲验的配方，收缩率试算接口直接返回 409。盲验页与配方档案可查逐批预测、实测、误差、曲线指纹与开通依据；「业务核验」中新增「收缩率盲验逐批误差」模块，可筛选、导出并由主管签认。
+
+| 角色 | 盲验权限 |
+|---|---|
+| `supervisor` 签发主管 | 封存/作废盲验，查看全部轮次与开通依据 |
+| `operator` 实验员 | 锁定见证批预测、登记见证实测 |
+| `viewer` 只读观察员 | 查阅盲验轮次、逐批误差与审计记录 |
 
 ## 启动
 
@@ -68,11 +84,11 @@ docker compose down -v --remove-orphans
 - 窗内预测仍需独立试片复测。预测超窗或复测超窗都会将这次校准留置。复测达窗且预测达窗时主管可签发。物理证据不足返回 HTTP 409 并记操作者、拒绝原因和时间。
 - Redis 唤醒队列以已提交的 MySQL 校准记录为准，短暂滞留会由 worker 扫描回收。错误单可用原快照重试。数据库批次行锁串行化曲线、测量、复测和签发写入。
 
-`backend/src/models.py` 与 `backend/migrations/initial.py` 定义初始数据库。`schemas.py` 是入参协议，`ledger.py` 是领域状态和工况提取，`routes.py` 暴露读写接口。`calculation.py` 与 `worker.py` 分离计算和队列提交。`frontend/src/api.js` 管理 API 和会话状态，`pages/` 实现四个页面，`components/` 保存共用状态标示、工艺窗和曲线。
+`backend/src/models.py` 与 `backend/migrations/initial.py` 定义初始数据库。`schemas.py` 是入参协议，`ledger.py` 是领域状态和工况提取，`routes.py` 暴露读写接口。`blind.py` 与 `blind_routes.py` 实现收缩率盲验的封存、预测锁定、实测核对、作废与开通。`calculation.py` 与 `worker.py` 分离计算和队列提交（worker 同时处理校准试算与盲验预测两类任务）。`frontend/src/api.js` 管理 API 和会话状态，`pages/` 实现五个页面，`components/` 保存共用状态标示、工艺窗和曲线。
 
 前端改动可通过 `docker compose up -d --build frontend` 重建。后端本地开发可装 `backend/requirements.txt`，设置 `DB_HOST`、`DB_PORT`、`REDIS_URL` 和数据库凭据，再从 `backend/` 运行 `python -m migrations.initial`、`python -m scripts.seed_demo`、`uvicorn src.app:app --reload`。直接运行 worker 时需提供可写的 `/evidence`，完整联调可用 Compose。
 
-共享枚举的后端定义均在 `backend/src/models.py`。`Role` 出现在 `auth.py`、`routes.py`、seed 与前端 `presentation.js`、`components/ledger.js`、`pages/` 的动作分支。`Stage` 出现在 `schemas.py`、`ledger.py`、seed 和前端 `presentation.js`、`pages/batches.js`、`pages/calibration.js`。`Phase` 出现在 `schemas.py`、`ledger.py`、seed 和前端 `presentation.js`、`components/curve.js`、`pages/batches.js`。`BatchState`、`RunState`、`ReleaseState` 由后端 `ledger.py`、`worker.py`、seed 写入，前端 `presentation.js`、`components/ledger.js` 和各业务页读取。
+共享枚举的后端定义均在 `backend/src/models.py`。`Role` 出现在 `auth.py`、`routes.py`、`blind_routes.py`、seed 与前端 `presentation.js`、`components/ledger.js`、`pages/` 的动作分支。`Stage` 出现在 `schemas.py`、`ledger.py`、seed 和前端 `presentation.js`、`pages/batches.js`、`pages/calibration.js`。`Phase` 出现在 `schemas.py`、`ledger.py`、seed 和前端 `presentation.js`、`components/curve.js`、`pages/batches.js`。`BatchState`、`RunState`、`ReleaseState` 由后端 `ledger.py`、`worker.py`、seed 写入，前端 `presentation.js`、`components/ledger.js` 和各业务页读取。`BlindState` 与 `WitnessState` 由 `blind.py`、`worker.py`、seed 写入，`blind_routes.py` 与前端 `pages/blind.js` 读取。
 
 授权方式沿用所属工作区的许可约定。
 
@@ -82,3 +98,4 @@ docker compose down -v --remove-orphans
 登录后打开页面右下角的「业务核验」。可从实时业务台账筛选记录、导出所选结果，主管可对当前证据签认并填写说明。
 
 - **试片测量重复性** 按冻干曲线和试片阶段对照原测与复测，差值超过 0.5 mm 时交计量主管复核。
+- **收缩率盲验逐批误差** 按封存盲验列出每个见证批的冻结曲线、先锁定的预测、后登记的实测与误差 pp，超差自动作废，全部达标才开放生产试算；主管可对逐批结果签认。
